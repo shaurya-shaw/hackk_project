@@ -54,6 +54,20 @@ db = DB()
 app = Flask(__name__)
 
 
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "http://localhost:5173"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    return response
+
+
+@app.route("/signup", methods=["OPTIONS"])
+@app.route("/login", methods=["OPTIONS"])
+def auth_preflight():
+    return ("", 204)
+
+
 def row_to_user(row):
     return {
         "id": row["id"],

@@ -2,16 +2,14 @@ import React, { useState } from "react";
 import { useForm } from "react-hook-form";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Layers, Eye, EyeOff, AlertCircle } from "lucide-react";
-import { signup } from "../lib/auth";
+import { login, saveAuthenticatedUser } from "../lib/auth";
 
-interface SignUpValues {
-  name: string;
-  username: string;
-  email: string;
+interface LoginValues {
+  identifier: string;
   password: string;
 }
 
-const Signup: React.FC = () => {
+const Login: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [showPassword, setShowPassword] = useState(false);
@@ -22,20 +20,21 @@ const Signup: React.FC = () => {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<SignUpValues>();
+  } = useForm<LoginValues>();
 
-  const onSubmit = async (data: SignUpValues) => {
+  const onSubmit = async (data: LoginValues) => {
     setServerError("");
 
     try {
-      await signup(data);
-      navigate("/login", {
+      const response = await login(data);
+      saveAuthenticatedUser(response.user);
+      navigate("/home", {
         replace: true,
-        state: { successMessage: "Account created successfully. Please log in." },
+        state: { successMessage: `Welcome back, ${response.user.name}!` },
       });
     } catch (error) {
       setServerError(
-        error instanceof Error ? error.message : "Unable to create account right now",
+        error instanceof Error ? error.message : "Unable to log in right now",
       );
     }
   };
@@ -43,7 +42,6 @@ const Signup: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center p-4 font-sans selection:bg-[#E50914]">
       <div className="w-full max-w-[420px] bg-[#141414] border border-zinc-800 p-8 md:p-12 rounded-sm shadow-2xl">
-        {/* Branding */}
         <div className="flex flex-col items-center mb-8">
           <div className="flex items-center gap-2 mb-1">
             <Layers className="text-[#E50914] w-7 h-7" strokeWidth={3} />
@@ -53,7 +51,7 @@ const Signup: React.FC = () => {
           </div>
         </div>
 
-        <h2 className="text-2xl font-bold mb-6">Sign Up</h2>
+        <h2 className="text-2xl font-bold mb-6">Log In</h2>
 
         {successMessage && (
           <p className="mb-4 rounded-sm border border-emerald-700 bg-emerald-950/60 px-4 py-3 text-sm text-emerald-300">
@@ -62,76 +60,30 @@ const Signup: React.FC = () => {
         )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          {/* Name */}
           <div className="space-y-1">
             <input
-              {...register("name", { required: "Name is required" })}
-              placeholder="Full Name"
-              className={`w-full bg-zinc-800 rounded-sm p-4 text-white placeholder-zinc-500 outline-none border-b-2 transition-all ${
-                errors.name
-                  ? "border-[#E50914]"
-                  : "border-transparent focus:border-zinc-500"
-              }`}
-            />
-            {errors.name && (
-              <p className="text-[#E50914] text-xs flex items-center gap-1">
-                <AlertCircle size={12} /> {errors.name.message}
-              </p>
-            )}
-          </div>
-
-          {/* Username */}
-          <div className="space-y-1">
-            <input
-              {...register("username", {
-                required: "Username is required",
-                minLength: { value: 3, message: "Min 3 characters" },
+              {...register("identifier", {
+                required: "Email or username is required",
               })}
-              placeholder="Username"
+              placeholder="Email or Username"
               className={`w-full bg-zinc-800 rounded-sm p-4 text-white placeholder-zinc-500 outline-none border-b-2 transition-all ${
-                errors.username
+                errors.identifier
                   ? "border-[#E50914]"
                   : "border-transparent focus:border-zinc-500"
               }`}
             />
-            {errors.username && (
+            {errors.identifier && (
               <p className="text-[#E50914] text-xs flex items-center gap-1">
-                <AlertCircle size={12} /> {errors.username.message}
+                <AlertCircle size={12} /> {errors.identifier.message}
               </p>
             )}
           </div>
 
-          {/* Email */}
-          <div className="space-y-1">
-            <input
-              {...register("email", {
-                required: "Email is required",
-                pattern: {
-                  value: /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i,
-                  message: "Invalid email address",
-                },
-              })}
-              placeholder="Email"
-              className={`w-full bg-zinc-800 rounded-sm p-4 text-white placeholder-zinc-500 outline-none border-b-2 transition-all ${
-                errors.email
-                  ? "border-[#E50914]"
-                  : "border-transparent focus:border-zinc-500"
-              }`}
-            />
-            {errors.email && (
-              <p className="text-[#E50914] text-xs flex items-center gap-1">
-                <AlertCircle size={12} /> {errors.email.message}
-              </p>
-            )}
-          </div>
-
-          {/* Password */}
           <div className="space-y-1">
             <div className="relative">
               <input
                 {...register("password", {
                   required: "Password is required",
-                  minLength: { value: 8, message: "Min 8 characters" },
                 })}
                 type={showPassword ? "text" : "password"}
                 placeholder="Password"
@@ -167,14 +119,14 @@ const Signup: React.FC = () => {
             disabled={isSubmitting}
             className="w-full bg-[#E50914] hover:bg-[#c11119] text-white font-bold py-4 rounded-sm transition-all mt-4 disabled:opacity-50"
           >
-            {isSubmitting ? "CREATING ACCOUNT..." : "SIGN UP"}
+            {isSubmitting ? "LOGGING IN..." : "LOG IN"}
           </button>
         </form>
 
         <p className="text-zinc-500 text-sm mt-8 text-center">
-          Already a member?{" "}
-          <Link to="/login" className="text-white hover:underline font-bold">
-            Log in
+          New here?{" "}
+          <Link to="/signup" className="text-white hover:underline font-bold">
+            Create an account
           </Link>
         </p>
       </div>
@@ -182,4 +134,4 @@ const Signup: React.FC = () => {
   );
 };
 
-export default Signup;
+export default Login;
