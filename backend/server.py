@@ -67,9 +67,11 @@ def add_cors_headers(response):
 
 @app.route("/signup", methods=["OPTIONS"])
 @app.route("/login", methods=["OPTIONS"])
+@app.route("/users", methods=["OPTIONS"])
 @app.route("/groups", methods=["OPTIONS"])
 @app.route("/groups/<int:group_id>", methods=["OPTIONS"])
 @app.route("/groups/<int:group_id>/invite", methods=["OPTIONS"])
+@app.route("/groups/<int:group_id>/payments", methods=["OPTIONS"])
 def auth_preflight():
     return ("", 204)
 
@@ -120,6 +122,29 @@ def get_group_by_id(conn, group_id):
     ).fetchone()
 
 
+def calculate_member_share(total_amount, count):
+    if not count:
+        return 0
+    return round(float(total_amount) / int(count), 2)
+
+
+def sync_group_member_amounts(conn, group_id):
+    group = get_group_by_id(conn, group_id)
+    if not group:
+        return None
+
+    share = calculate_member_share(group["total_amount"], group["count"])
+    conn.execute(
+        """
+        UPDATE users
+        SET amount = ?
+        WHERE group_id = ?
+        """,
+        (share, group_id),
+    )
+    return share
+
+
 def serialize_group(row, members):
     owner = None
     if row["owner_id"]:
@@ -152,6 +177,19 @@ def serialize_group(row, members):
             for member in members
         ],
     }
+
+
+def fetch_group_members(conn, group_id):
+    return conn.execute(
+        """
+        SELECT c.id, c.email, c.username, c.name, u.is_paid, u.amount, u.paid_at
+        FROM users u
+        JOIN credentials c ON c.id = u.user_id
+        WHERE u.group_id = ?
+        ORDER BY c.id
+        """,
+        (group_id,),
+    ).fetchall()
 
 @app.route("/")
 async def home():
@@ -232,22 +270,13 @@ def group_details():
                c.email AS owner_email, c.username AS owner_username, c.name AS owner_name
         FROM groups g
         LEFT JOIN credentials c ON c.id = g.owner_id
-        ORDER BY id
+        ORDER BY g.id
         """
     ).fetchall()
 
     result = []
     for group in groups:
-        members = conn.execute(
-            """
-            SELECT c.id, c.email, c.username, c.name, u.is_paid, u.amount, u.paid_at
-            FROM users u
-            JOIN credentials c ON c.id = u.user_id
-            WHERE u.group_id = ?
-            ORDER BY c.id
-            """,
-            (group["id"],),
-        ).fetchall()
+        members = fetch_group_members(conn, group["id"])
 
         result.append(
             serialize_group(group, members)
@@ -291,24 +320,16 @@ def create_group():
             INSERT OR IGNORE INTO users (user_id, group_id, is_paid, amount, paid_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (owner_id, group_id, 0, None, None),
+            (owner_id, group_id, 0, 0, None),
         )
+        sync_group_member_amounts(conn, group_id)
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
         return jsonify({"error": "group title already exists"}), 409
 
     group = get_group_by_id(conn, group_id)
-    members = conn.execute(
-        """
-        SELECT c.id, c.email, c.username, c.name, u.is_paid, u.amount, u.paid_at
-        FROM users u
-        JOIN credentials c ON c.id = u.user_id
-        WHERE u.group_id = ?
-        ORDER BY c.id
-        """,
-        (group_id,),
-    ).fetchall()
+    members = fetch_group_members(conn, group_id)
     conn.close()
     return jsonify({"message": "group created", "group": serialize_group(group, members)}), 201
 
@@ -338,6 +359,10 @@ def update_group(group_id):
     total_amount = data.get("total_amount", group["total_amount"])
     count = data.get("count", group["count"])
 
+    if int(count) < 1:
+        conn.close()
+        return jsonify({"error": "count must be at least 1"}), 400
+
     try:
         conn.execute(
             """
@@ -347,22 +372,14 @@ def update_group(group_id):
             """,
             (title, description, total_amount, count, group_id),
         )
+        sync_group_member_amounts(conn, group_id)
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close()
         return jsonify({"error": "group title already exists"}), 409
 
     updated_group = get_group_by_id(conn, group_id)
-    members = conn.execute(
-        """
-        SELECT c.id, c.email, c.username, c.name, u.is_paid, u.amount, u.paid_at
-        FROM users u
-        JOIN credentials c ON c.id = u.user_id
-        WHERE u.group_id = ?
-        ORDER BY c.id
-        """,
-        (group_id,),
-    ).fetchall()
+    members = fetch_group_members(conn, group_id)
     conn.close()
     return jsonify({"message": "group updated", "group": serialize_group(updated_group, members)}), 200
 
@@ -372,9 +389,10 @@ def invite_user_to_group(group_id):
     data = request.get_json(silent=True) or {}
     requester_id = data.get("requester_id")
     invitee_id = data.get("invitee_id")
+    identifier = (data.get("identifier") or "").strip()
 
-    if requester_id is None or invitee_id is None:
-        return jsonify({"error": "requester_id and invitee_id are required"}), 400
+    if requester_id is None or (invitee_id is None and not identifier):
+        return jsonify({"error": "requester_id and invitee_id or identifier are required"}), 400
 
     conn = db.connect()
     ensure_group_owner_column(conn)
@@ -388,7 +406,19 @@ def invite_user_to_group(group_id):
         conn.close()
         return jsonify({"error": "only the owner can invite users"}), 403
 
-    invitee = get_user_by_id(conn, invitee_id)
+    if invitee_id is None:
+        invitee = conn.execute(
+            """
+            SELECT id, email, username, name
+            FROM credentials
+            WHERE email = ? OR username = ?
+            """,
+            (identifier.lower(), identifier),
+        ).fetchone()
+        invitee_id = invitee["id"] if invitee else None
+    else:
+        invitee = get_user_by_id(conn, invitee_id)
+
     if not invitee:
         conn.close()
         return jsonify({"error": "invitee not found"}), 404
@@ -411,28 +441,107 @@ def invite_user_to_group(group_id):
         INSERT INTO users (user_id, group_id, is_paid, amount, paid_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (invitee_id, group_id, 0, None, None),
+        (invitee_id, group_id, 0, 0, None),
     )
+    sync_group_member_amounts(conn, group_id)
     conn.commit()
 
-    members = conn.execute(
-        """
-        SELECT c.id, c.email, c.username, c.name, u.is_paid, u.amount, u.paid_at
-        FROM users u
-        JOIN credentials c ON c.id = u.user_id
-        WHERE u.group_id = ?
-        ORDER BY c.id
-        """,
-        (group_id,),
-    ).fetchall()
+    refreshed_group = get_group_by_id(conn, group_id)
+    members = fetch_group_members(conn, group_id)
     conn.close()
     return jsonify(
         {
             "message": "user invited successfully",
-            "group": serialize_group(group, members),
+            "group": serialize_group(refreshed_group, members),
             "invited_user": row_to_user(invitee),
         }
     ), 201
+
+
+@app.route("/groups/<int:group_id>/payments", methods=["POST"])
+def mark_payment(group_id):
+    data = request.get_json(silent=True) or {}
+    requester_id = data.get("requester_id")
+    user_id = data.get("user_id", requester_id)
+    is_paid = data.get("is_paid", True)
+
+    if requester_id is None:
+        return jsonify({"error": "requester_id is required"}), 400
+
+    conn = db.connect()
+    ensure_group_owner_column(conn)
+    group = get_group_by_id(conn, group_id)
+
+    if not group:
+        conn.close()
+        return jsonify({"error": "group not found"}), 404
+
+    membership = conn.execute(
+        """
+        SELECT user_id
+        FROM users
+        WHERE user_id = ? AND group_id = ?
+        """,
+        (requester_id, group_id),
+    ).fetchone()
+
+    if not membership:
+        conn.close()
+        return jsonify({"error": "requester is not part of this group"}), 403
+
+    target_membership = conn.execute(
+        """
+        SELECT user_id
+        FROM users
+        WHERE user_id = ? AND group_id = ?
+        """,
+        (user_id, group_id),
+    ).fetchone()
+
+    if not target_membership:
+        conn.close()
+        return jsonify({"error": "user is not part of this group"}), 404
+
+    if requester_id != user_id and group["owner_id"] != requester_id:
+        conn.close()
+        return jsonify({"error": "only the owner can update another member payment"}), 403
+
+    conn.execute(
+        """
+        UPDATE users
+        SET is_paid = ?, paid_at = CASE WHEN ? THEN strftime('%s', 'now') ELSE NULL END
+        WHERE user_id = ? AND group_id = ?
+        """,
+        (1 if is_paid else 0, 1 if is_paid else 0, user_id, group_id),
+    )
+    conn.commit()
+
+    refreshed_group = get_group_by_id(conn, group_id)
+    members = fetch_group_members(conn, group_id)
+    conn.close()
+    return jsonify({"message": "payment updated", "group": serialize_group(refreshed_group, members)}), 200
+
+
+@app.route("/users", methods=["GET"])
+def list_users():
+    query = (request.args.get("q") or "").strip()
+    limit = min(int(request.args.get("limit", 10) or 10), 25)
+    conn = db.connect()
+    users = conn.execute(
+        """
+        SELECT id, email, username, name
+        FROM credentials
+        WHERE ? = ''
+           OR username LIKE '%' || ? || '%'
+           OR email LIKE '%' || ? || '%'
+           OR name LIKE '%' || ? || '%'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (query, query, query.lower(), query, limit),
+    ).fetchall()
+    conn.close()
+    return jsonify({"users": [row_to_user(user) for user in users]}), 200
 
 
 @app.route("/users/<int:user_id>/details", methods=["GET"])

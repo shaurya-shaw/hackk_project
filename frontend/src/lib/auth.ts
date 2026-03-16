@@ -66,3 +66,21 @@ export async function login(payload: LoginPayload) {
 export function saveAuthenticatedUser(user: AuthUser) {
   localStorage.setItem("auth-user", JSON.stringify(user));
 }
+
+export function getAuthenticatedUser() {
+  const rawUser = localStorage.getItem("auth-user");
+  if (!rawUser) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawUser) as AuthUser;
+  } catch {
+    localStorage.removeItem("auth-user");
+    return null;
+  }
+}
+
+export function clearAuthenticatedUser() {
+  localStorage.removeItem("auth-user");
+}
